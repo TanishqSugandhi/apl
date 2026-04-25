@@ -1,0 +1,8 @@
+streamlit
+transformers
+sentence-transformers
+langdetect
+deep-translator
+numpy
+gTTS
+torch
