@@ -1,5 +1,5 @@
 import streamlit as st
-from transformers import pipeline
+from transformers import pipeline, AutoTokenizer, AutoModelForQuestionAnswering
 from sentence_transformers import SentenceTransformer
 from langdetect import detect
 from deep_translator import GoogleTranslator
@@ -10,14 +10,20 @@ from io import BytesIO
 # --- Page Config ---
 st.set_page_config(page_title="Rural Health AI", page_icon="🏥")
 
-# --- Model Loading (Cached for Performance) ---
+# --- Model Loading (Cached & Hardened) ---
 @st.cache_resource
 def load_models():
     # Embedding model
     embedder = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
-    # QA Pipeline
-    qa_pipeline = pipeline("question-answering", model="distilbert-base-uncased-distilled-squad")
-    return embedder, qa_pipeline
+    
+    # QA Model & Tokenizer explicitly loaded
+    model_name = "distilbert-base-uncased-distilled-squad"
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = AutoModelForQuestionAnswering.from_pretrained(model_name)
+    
+    # Force the task name and pass model/tokenizer directly
+    qa_pipe = pipeline("question-answering", model=model, tokenizer=tokenizer)
+    return embedder, qa_pipe
 
 embedder, qa_pipeline = load_models()
 
@@ -29,7 +35,8 @@ KB_PARAS = [
     "Chest pain with sweating and breathlessness is an emergency. Go to a hospital immediately.",
     "Dehydration in children: signs include sunken eyes and dry mouth. Give ORS immediately.",
     "Malaria symptoms: fever, chills, and headache. Requires prompt medical testing.",
-    "Wash hands with soap before food and after toilet use to prevent diseases."
+    "Wash hands with soap before food and after toilet use to prevent diseases.",
+    "High Blood Pressure (BP) can be managed by reducing salt intake and regular walking."
 ]
 
 @st.cache_data
@@ -48,11 +55,13 @@ def translate_text(text, src="auto", dst="en"):
 def get_answer(question_en):
     # Context Retrieval
     q_emb = embedder.encode([question_en], convert_to_numpy=True)[0]
-    cos_sim = np.dot(kb_emb, q_emb) / (np.linalg.norm(kb_emb, axis=1) * np.linalg.norm(q_emb))
-    ctx = KB_PARAS[np.argmax(cos_sim)]
+    # Dot product for similarity
+    scores = np.dot(kb_emb, q_emb) / (np.linalg.norm(kb_emb, axis=1) * np.linalg.norm(q_emb))
+    best_idx = np.argmax(scores)
+    ctx = KB_PARAS[best_idx]
     
     # QA logic
-    result = qa_pipeline({"question": question_en, "context": ctx})
+    result = qa_pipeline(question=question_en, context=ctx)
     return result['answer'], result['score'], ctx
 
 # --- Streamlit UI ---
@@ -68,32 +77,37 @@ if user_input:
     except:
         lang = "en"
     
-    # 2. Translate if Telugu
-    query_en = translate_text(user_input, src=lang, dst="en") if lang == "te" else user_input
-    
-    # 3. Get Answer
-    with st.spinner("Analyzing..."):
+    # 2. Process query
+    with st.spinner("Processing..."):
+        # Translate to English if detected as Telugu
+        query_en = translate_text(user_input, src=lang, dst="en") if lang == "te" else user_input
+        
+        # Get Answer
         ans, score, context = get_answer(query_en)
         
+        # logic for low confidence
         if score < 0.1:
-            final_ans = f"I'm not sure, but here is some related info: {context}"
+            final_ans = f"I'm not entirely sure, but here is some related information: {context}"
         else:
-            final_ans = ans
+            final_ans = f"{ans}"
             
-        # Add safety warnings
-        final_ans += "\n\n**Note:** Informational only. Consult a doctor for medical decisions."
+        final_ans += "\n\nNote: This is for information only. Consult a doctor for medical decisions."
 
-        # 4. Translate back if needed
+        # Translate back to Telugu if input was Telugu
         output_text = translate_text(final_ans, src="en", dst="te") if lang == "te" else final_ans
         
-    # 5. Display Results
+    # 3. Display Results
     st.subheader("Response:")
     st.write(output_text)
     
-    # 6. Audio Playback
-    tts = gTTS(text=output_text, lang=lang)
-    audio_fp = BytesIO()
-    tts.write_to_fp(audio_fp)
-    st.audio(audio_fp, format="audio/mp3")
+    # 4. Audio Playback
+    try:
+        tts = gTTS(text=output_text, lang=lang if lang in ['en', 'te'] else 'en')
+        audio_fp = BytesIO()
+        tts.write_to_fp(audio_fp)
+        st.audio(audio_fp, format="audio/mp3")
+    except:
+        st.warning("Audio generation failed for this language.")
 
-st.info("Emergency: If you have chest pain or breathing trouble, go to the nearest hospital immediately.")
+st.divider()
+st.info("🚨 **Emergency:** If you have chest pain, severe bleeding, or trouble breathing, go to the nearest hospital immediately.")
